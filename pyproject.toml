@@ -1,0 +1,45 @@
+[project]
+name = "InstMan"
+description = "Insta Account Monitoring"
+version = "1.0.0"
+# keywords = []
+authors = [
+    { name = "AlienX", email = "AlienX@duck.com" }
+]
+dependencies = [
+    "instaloader",
+    "PyYaml"
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.8"
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+]
+
+[project.urls]
+Documentation = "https://rocketgit.com/user/AlienX/InstMan"
+Source = "https://rocketgit.com/user/AlienX/InstMan"
+
+[build-system]
+requires = ["flit"]
+build-backend = "flit.buildapi"
+
+[tool.pyright]
+include = ["."]
+exclude = ["**/__pycache__","./venk"]
+defineConstant = { DEBUG = true }
+venv = "venk"
+
+reportMissingImports = true
+reportOptionalSubscript = false
+# reportMissingTypeStubs = false
+
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+
