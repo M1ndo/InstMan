@@ -72,13 +72,15 @@ class InstMan():
         """ Check if data directory and its files exists """
         users_file.parent.mkdir(parents=True,exist_ok=True)
         users_file.touch()
-        # userdata_file.touch()
 
     def user_file(self, userid):
         """ Create a user file that contains its full information """
-        user_file = Path(f"~/.config/instman/{userid}_data.yml").expanduser()
+        user_file = Path(f"~/.config/instman/userdata/{userid}/data.yml").expanduser()
+        user_mark = Path(f"~/.config/instman/userdata/{userid}/changes.yml").expanduser()
+        user_file.parent.mkdir(parents=True,exist_ok=True)
         user_file.touch()
-        return user_file
+        user_mark.touch()
+        return user_file, user_mark
 
     def write_data_to_file(self, user_file, data):
         with open(user_file, 'w') as file:
@@ -128,6 +130,7 @@ class InstMan():
         snew_data = {k: {k2: v2 for k2, v2 in v.items() if k2 != 'added_date'} for k, v in new_data.items()}
         sold_data = {k: {k2: v2 for k2, v2 in v.items() if k2 != 'added_date'} for k, v in old_data.items()}
         pot_new = []
+        pot_old = []
         for key, new_values in snew_data.items():
             old_values = sold_data.get(key, {})
             if old_values != new_values:
@@ -136,9 +139,11 @@ class InstMan():
                     k = next(iter(changed_values.keys()))
                     logging.info(f"Key {key} {k} was changed: {changed_values[k]} Old Value: {old_values.get(k)}")
                     pot_new.append(changed_values)
+                    pot_old.append(old_values)
         if pot_new:
             item = pot_new[0]
             keys = [key for key in (iter(item.keys()))]
+            self.save_changes(pot_new, pot_old, userid)
             for k in keys:
                 if k in ["followers", "following"]:
                     self.detect_changes(userid, profile, k)
@@ -164,7 +169,7 @@ class InstMan():
 
     # def detect_changes(self, userid, profile, data_type):
     #     """ Detect changes that were made """
-    #     user_file = self.user_file(userid)
+    #     user_file, _ = self.user_file(userid)
     #     user_data, _ = self.read_data(user_file, userid)
     #     old_data_set = set(user_data[userid][data_type])
     #     new_data_set = set(
@@ -183,7 +188,7 @@ class InstMan():
 
     def detect_changes(self, userid, profile, k):
         """ Detect changes that were made """
-        user_file = self.user_file(userid)
+        user_file, _ = self.user_file(userid)
         user_data, _ = self.read_data(user_file, userid)
         if k == "followers":
             old_data_set = set(user_data[userid]['followers'])
@@ -221,9 +226,24 @@ class InstMan():
             print(metadata)
         return metadata
 
+    def save_changes(self, changes, old_changes, userid):
+        """ Save User Changes Into A File """
+        _, user_mark = self.user_file(userid)
+        changes_keys = list(changes[0].keys())
+        data = []
+        for key in changes_keys:
+            new = {
+                "field": key,
+                "old_value": old_changes[0][key],
+                "new_value": changes[0][key],
+                "date_added": date_time,
+            }
+            data.append(new)
+        self.write_data_to_file(user_mark, data)
+
     def data_new(self, userid, key, new_data):
         """ Save new recorded data into a file """
-        userfile = Path(f"~/.config/instman/{userid}_recorded.json").expanduser()
+        userfile = Path(f"~/.config/instman/userdata/{userid}/recorded.json").expanduser()
         userfile.touch()
         tmp, _ = self.read_data(userfile, userid)
         data = {
@@ -233,7 +253,7 @@ class InstMan():
                 "following": []
             }
         }
-        if tmp is not None and tmp[userid][key]:
+        if tmp is not None:
             tmp[userid][key].append(new_data)
             data = tmp
         if tmp is None and new_data is not None:
@@ -243,7 +263,7 @@ class InstMan():
 
     def renew_data(self, data, userid, k, v):
         """ Renew old data once changes were made """
-        user_file = self.user_file(userid)
+        user_file, _ = self.user_file(userid)
         user_data, _ = self.read_data(user_file, userid)
         for item in data[v + k.capitalize()]:
             if "New" in v:
@@ -258,7 +278,7 @@ class InstMan():
 
     def save_data(self, userid, profile):
         """ Save new data in a file """
-        user_file = self.user_file(userid)
+        user_file, _ = self.user_file(userid)
         read_data, _ = self.read_data(user_file, userid)
         if not read_data:
             followers = self.get_followers(profile) # list
@@ -277,10 +297,11 @@ class InstMan():
                 logging.error(f'[-] Error writing data to file: {e}')
 
 username = sys.argv[1]
+user = sys.argv[2]
 Ist = InstMan(username, "")
 Ist.create_files()
 # Ist.get_info(sys.argv[1])
-Ist.user_data(sys.argv[1])
+Ist.user_data(user)
 # print(Ist.read_data())
 # Ist.load_session()
 # Ist.get_followers()
