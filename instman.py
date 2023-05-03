@@ -5,17 +5,7 @@ import instaloader
 from instaloader import FrozenNodeIterator, resumable_iteration
 from datetime import datetime
 from pathlib import Path
-import yaml, logging, json, sys
-
-# Adding Logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s %(message)s',
-    handlers=[
-        logging.FileHandler('debug.log'),
-        logging.StreamHandler()
-    ]
-)
+import yaml, logging, json, argparse
 
 date_time = datetime.now().strftime("%Y/%-m/%-d :: %H:%M:%S")
 users_file = Path("~/.config/instman/users.yml").expanduser()
@@ -25,6 +15,7 @@ class InstMan():
         self.username = username
         self.password = password
         self.api = instaloader.Instaloader()
+        self.load_session()
         # self.api.load_session_from_file(self.username)
 
     # This method is discouraged because verification issues.
@@ -94,34 +85,34 @@ class InstMan():
         exist = userid in data
         return data,exist
 
-    def user_data(self, user):
+    def user_data(self, users):
         """ Construct a set of data of a user and save it """
-        profile = Ist.profile_access(user, auth=True)
-        p_userid = str(profile.userid)
-        data = {
-            f"{profile.userid}": {
-                'username': profile.username, 'full_name': profile.full_name,
-                'added_date': date_time, 'followers': profile.followers,
-                'following': profile.followees, 'is_private': profile.is_private,
-                'is_followed': profile.followed_by_viewer, 'is_following': profile.follows_viewer,
+        for user in users:
+            user = user.strip()
+            profile = self.profile_access(user)
+            logging.info(f"Checking {user} for new/previous changes.")
+            p_userid = str(profile.userid)
+            data = {
+                f"{profile.userid}": {
+                    'username': profile.username, 'full_name': profile.full_name,
+                    'added_date': date_time, 'followers': profile.followers,
+                    'following': profile.followees, 'is_private': profile.is_private,
+                    'is_followed': profile.followed_by_viewer, 'is_following': profile.follows_viewer,
+                }
             }
-        }
-        users_data, exist = self.read_data(users_file, p_userid)
-        if exist is None or not exist:
-            logging.info(f"INFO: Adding a new user {user} to users data.")
-            try:
-                users_data.update(data)
-            except Exception:
-                users_data = data
-            self.write_data_to_file(users_file, users_data)
-            self.save_data(p_userid, profile)
-            return True
-        self.check_change(users_data, data, p_userid, profile)
+            users_data, exist = self.read_data(users_file, p_userid)
+            if not exist:
+                logging.info(f"INFO: Adding a new user {user} to users data.")
+                try:
+                    users_data.update(data)
+                except Exception:
+                    users_data = data
+                self.write_data_to_file(users_file, users_data)
+                self.save_data(p_userid, profile)
+            self.check_change(users_data, data, p_userid, profile)
 
-    def profile_access(self, user, auth=False):
+    def profile_access(self, user):
         """ Return profile based on privacy ."""
-        if auth:
-            self.load_session()
         profile = instaloader.Profile.from_username(self.api.context, user)
         return profile
 
@@ -159,56 +150,28 @@ class InstMan():
         self.write_data_to_file(users_file, old_data)
         logging.info(f"Successfully Written Wrote {userid} New Data.")
 
-    def grab_dict(self, item_name, sett):
-        """ Turn a set into a serializable yaml dictionary """
-        if not len(sett) == 0:
-            items = [v for _, v in enumerate(sett)]
-            dict = {item_name: [item for item in items], "added_date": date_time}
-            return dict
-
-
-    # def detect_changes(self, userid, profile, data_type):
-    #     """ Detect changes that were made """
-    #     user_file, _ = self.user_file(userid)
-    #     user_data, _ = self.read_data(user_file, userid)
-    #     old_data_set = set(user_data[userid][data_type])
-    #     new_data_set = set(
-    #         follower.username for follower in self.get_followers(profile)
-    #     ) if data_type == "followers" else set(
-    #         followee.username for followee in self.get_followees(profile)
-    #     )
-    #     diff_data = {
-    #         "New " + data_type.capitalize(): list(new_data_set - old_data_set),
-    #         "Lost " + data_type.capitalize(): list(old_data_set - new_data_set),
-    #     }
-    #     for change_type, change_data in diff_data.items():
-    #         if change_data:
-    #             self.data_new(userid, data_type, {change_type: change_data})
-    #             self.renew_data(change_data, userid, data_type, change_type)
-
-    def detect_changes(self, userid, profile, k):
+    def detect_changes(self, userid, profile, data_type):
         """ Detect changes that were made """
         user_file, _ = self.user_file(userid)
         user_data, _ = self.read_data(user_file, userid)
-        if k == "followers":
-            old_data_set = set(user_data[userid]['followers'])
-            new_data_set = set(follower.username for follower in self.get_followers(profile))
-        else:
-            old_data_set = set(user_data[userid]['following'])
-            new_data_set = set(followee.username for followee in self.get_followees(profile))
-        added_data = self.grab_dict("New " + k.capitalize(), new_data_set - old_data_set)
-        removed_data = self.grab_dict("Lost " + k.capitalize(), old_data_set - new_data_set)
-        if added_data:
-            self.data_new(userid, k, added_data)
-            self.renew_data(added_data, userid, k, "New ")
-        if removed_data:
-            self.data_new(userid, k, removed_data)
-            self.renew_data(removed_data, userid, k, "Lost ")
-
+        old_data_set = set(user_data[userid][data_type])
+        new_data_set = set(
+            follower.username for follower in self.get_followers(profile)
+        ) if data_type == "followers" else set(
+            followee.username for followee in self.get_followees(profile)
+        )
+        diff_data = {
+            "New " + data_type.capitalize(): list(new_data_set - old_data_set),
+            "Lost " + data_type.capitalize(): list(old_data_set - new_data_set),
+        }
+        for change_type, change_data in diff_data.items():
+            if change_data:
+                self.data_new(userid, data_type, {change_type: change_data, "added_date": date_time})
+                self.renew_data({change_type: change_data, "added_date": date_time}, userid, data_type, change_type.split()[0] + " ")
 
     def get_info(self, username, p=True):
         """ Get User Information and print it """
-        profile = self.profile_access(username, auth=False)
+        profile = self.profile_access(username)
         metadata = {
             'username': profile.username,
             'Full name': profile.full_name,
@@ -226,11 +189,45 @@ class InstMan():
             print(metadata)
         return metadata
 
+    def list_media(self, user):
+        """ List media of user including all their profile stories/reels/photos """
+        profile = self.profile_access(user)
+        self.api.save_metadata = True
+        self.api.compress_json = False
+        self.api.download_geotags = True
+        self.api.filename_pattern = "{profile}_{date_utc:%Y-%m-%d_%H-%M-%S}"
+        # userid = []; userid.append(profile.userid)
+        # a = [story for story in self.api.get_stories(userid)]
+        # for story in self.api.get_stories():
+        #     # story is a Story object
+        #     for item in story.get_items():
+        #         # item is a StoryItem object
+        #         self.api.download_storyitem(item, ':stories')
+        count=0
+        for p in profile.get_posts():
+            b = self.api.download_post(post=p, target=profile.username)
+            if b and count != 1:
+                count += 1
+            else:
+                exit(0)
+        # for highlight in self.api.get_highlights(profile.userid):
+        #     for item in highlight.get_items():
+                # item is a StoryItem object
+                # print(item.url)
+                # self.api.download_storyitem(item, '{}/{}'.format(highlight.owner_username, highlight.title))
+
+        print(a)
+        # self.api.download_stories(userids=userid)
+        # api.download
+        return None
+
     def save_changes(self, changes, old_changes, userid):
         """ Save User Changes Into A File """
         _, user_mark = self.user_file(userid)
+        sdata, _ = self.read_data(user_mark, userid)
         changes_keys = list(changes[0].keys())
-        data = []
+        if not sdata:
+            sdata = []
         for key in changes_keys:
             new = {
                 "field": key,
@@ -238,8 +235,8 @@ class InstMan():
                 "new_value": changes[0][key],
                 "date_added": date_time,
             }
-            data.append(new)
-        self.write_data_to_file(user_mark, data)
+            sdata.append(new)
+        self.write_data_to_file(user_mark, sdata)
 
     def data_new(self, userid, key, new_data):
         """ Save new recorded data into a file """
@@ -275,7 +272,6 @@ class InstMan():
         self.write_data_to_file(user_file, user_data)
         logging.info(f'[+] Sucessfully Updated DB')
 
-
     def save_data(self, userid, profile):
         """ Save new data in a file """
         user_file, _ = self.user_file(userid)
@@ -296,13 +292,34 @@ class InstMan():
             except Exception as e:
                 logging.error(f'[-] Error writing data to file: {e}')
 
-username = sys.argv[1]
-user = sys.argv[2]
-Ist = InstMan(username, "")
-Ist.create_files()
-# Ist.get_info(sys.argv[1])
-Ist.user_data(user)
-# print(Ist.read_data())
-# Ist.load_session()
-# Ist.get_followers()
-# Ist.get_session()
+def main():
+    parser = argparse.ArgumentParser(description="InstMan An Account Monitoring Tool", add_help=True)
+    parser.add_argument('-c', '--change', action="store_true", help="Mark Changes Of An Account", dest="change")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-i', '--user', type=str, nargs='+', help="Username(s) to do actions to", dest="user")
+    group.add_argument('-f', '--users-file', type=argparse.FileType('r'), help="File that contains Username(s) to do actions to", dest='users')
+    parser.add_argument('-u', '--username', type=str, help="Username to authenticate with", dest="auth")
+    parser.add_argument('-p', '--info', action="store_true", help="Print Information of a user", dest="print")
+    parser.add_argument('-m', '--media', action="store_true", help="List Username Media", dest="media")
+    parser.add_argument('-d', '--debug', action='store_true', help='Enable debug logging')
+
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
+                        format='%(asctime)s %(levelname)s %(message)s',
+                        handlers=[logging.FileHandler('debug.log'), logging.StreamHandler()])
+    Ist = InstMan(args.auth, "")
+    Ist.create_files()
+    if args.change:
+        if args.users:
+            with args.users as f:
+                users = f.readlines()
+                Ist.user_data(users)
+        else:
+            Ist.user_data(list(args.user))
+    elif args.print:
+        Ist.get_info(args.user[0])
+    elif args.media:
+        Ist.list_media(args.user[0])
+    else:
+        print("Nothing Checked")
+main()
