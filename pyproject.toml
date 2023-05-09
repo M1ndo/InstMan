@@ -8,7 +8,8 @@ authors = [
 ]
 dependencies = [
     "instaloader",
-    "PyYaml"
+    "PyYaml",
+    "tqdm"
 ]
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -31,15 +32,21 @@ requires = ["flit"]
 build-backend = "flit.buildapi"
 
 [tool.pyright]
-include = ["."]
-exclude = ["**/__pycache__","./venk"]
+include = ["src"]
+exclude = ["**/__pycache__"]
+# ignore = ["src/library/**"]
 defineConstant = { DEBUG = true }
-venv = "venk"
+venvPath = "."
+venv = "venv"
 
 reportMissingImports = true
 reportOptionalSubscript = false
+reportPrivateImportUsage = false
+reportOptionalMemberAccess = false
 # reportMissingTypeStubs = false
-
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 pythonPlatform = "Linux"
 
+executionEnvironments = [
+    { root = "src" },
+]
