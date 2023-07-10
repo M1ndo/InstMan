@@ -9,13 +9,13 @@ from library.instaloader.instaloader.structures import PostLocation, Highlight, 
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
-from typing import Tuple, Union, List, Dict, Any
+from typing import Tuple, Union, List, Dict, Any, Set
 from multiprocessing.pool import ThreadPool
+from collections import defaultdict
 from args_format import arguments
 from postdata import GetInfo
 import yaml, logging, json, time
 from pdb import set_trace as bp
-
 
 date_time = datetime.now().strftime("%Y/%-m/%-d :: %H:%M:%S")
 users_file = Path("~/.config/instman/users.yml").expanduser()
@@ -38,7 +38,11 @@ class InstMan():
 
     def load_session(self):
         self.api.load_session_from_file(username=self.username, filename=Path(f"~/.config/instman/{self.username}.session").expanduser().as_posix())
-        logging.info("Loaded session username %s" %(self.username))
+        logging.info("Testing %s session validation." %(self.username))
+        if not self.api.test_login():
+            logging.info("Error session has been expired")
+            logging.info("Generate a new session")
+            exit(1)
 
     def get_followers(self, profile: Profile) -> List[Profile]:
         """ Obtain User Followers """
@@ -96,16 +100,22 @@ class InstMan():
         users_file.parent.mkdir(parents=True,exist_ok=True)
         users_file.touch()
 
-    def user_file(self, userid):
-        """ Create a user file that contains its full information """
-        user_file = Path(f"~/.config/instman/userdata/{userid}/data.yml").expanduser()
-        user_mark = Path(f"~/.config/instman/userdata/{userid}/changes.yml").expanduser()
-        user_post = Path(f"~/.config/instman/userdata/{userid}/postdata.json").expanduser()
-        user_file.parent.mkdir(parents=True,exist_ok=True)
-        user_file.touch()
-        user_mark.touch()
-        user_post.touch()
-        return user_file, user_mark, user_post
+    def user_file(self, userid: str, file_type: str) -> Path:
+        """Create a user file that contains its full information"""
+        file_type_map = {
+            "data": "data.yml",
+            "changes": "changes.yml",
+            "postdata": "postdata.json",
+            "storydata": "storydata.json"
+        }
+        user_data_dir = Path("~/.config/instman/userdata").expanduser()
+        file_path = user_data_dir / userid / file_type_map.get(file_type) # type: ignore
+        if file_path:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.touch()
+            return file_path
+        # Add an assertion to guarantee a Path object is returned
+        assert False, "Invalid file type"
 
     def write_data_to_file(self, user_file, data):
         with open(user_file, 'w') as file:
@@ -129,7 +139,7 @@ class InstMan():
                     return None
             json.dump(data, fdata)
 
-    def user_data(self, users):
+    def user_data(self, users, ignored=False):
         """ Construct a set of data of a user and save it """
         for user in users:
             user = user.strip()
@@ -153,7 +163,9 @@ class InstMan():
                     users_data = data
                 self.write_data_to_file(users_file, users_data)
                 self.save_data(p_userid, profile)
-            self.check_change(users_data, data, p_userid, profile)
+            if ignored:
+                self.detect_changes(p_userid, profile, data_type=["followers", "following"])
+            else: self.check_change(users_data, data, p_userid, profile)
 
     def profile_access(self, user):
         """ Return profile based on privacy ."""
@@ -194,9 +206,13 @@ class InstMan():
         self.write_data_to_file(users_file, old_data)
         logging.info(f"Successfully Written Wrote {userid} New Data.")
 
-    def detect_changes(self, userid, profile, data_type):
+    def detect_changes(self, userid: str, profile: Profile, data_type: Union[List, str]):
         """ Detect changes that were made """
-        user_file, _, _ = self.user_file(userid)
+        if isinstance(data_type, list):
+            for item in data_type:
+                self.detect_changes(userid, profile, item)
+            return
+        user_file = self.user_file(userid, "data")
         user_data, _ = self.read_data(user_file, userid)
         old_data_set = set(user_data[userid][data_type])
         new_data_set = set(
@@ -208,10 +224,13 @@ class InstMan():
             "New " + data_type.capitalize(): list(new_data_set - old_data_set),
             "Lost " + data_type.capitalize(): list(old_data_set - new_data_set),
         }
+        has_changes = any(change_data for _, change_data in diff_data.items())
         for change_type, change_data in diff_data.items():
             if change_data:
                 self.data_new(userid, data_type, {change_type: change_data, "added_date": date_time})
                 self.renew_data({change_type: change_data, "added_date": date_time}, userid, data_type, change_type.split()[0] + " ")
+        if not has_changes:
+            logging.info(f"[-] User {profile.username} has no hidden changes in {data_type}")
 
     def get_info(self, username: str, p=True) -> dict:
         """ Get User Information and print it """
@@ -247,7 +266,7 @@ class InstMan():
                 logging.info(f"Downloading {media_title} total items [{media.itemcount}].")
                 with tqdm(total=media.itemcount, desc=f"Downloading {media_type} {media_title}", colour="#6a5acd", unit_scale=True, unit="MB", smoothing=0.5) as pbar:
                     for item in media.get_items():
-                        path = f"media/{media.owner_username}/stories/" if media_type == "Story" else f"media/{media.owner_username}/highlights/{media.title}/"
+                        path = f"media/{media.owner_username}/stories/story_{item.date_local.strftime('%Y-%m-%d')}/" if media_type == "Story" else f"media/{media.owner_username}/highlights/{media.unique_id}_{media.title}/"
                         if self.api.download_storyitem(item=item, target=Path(path)):
                             pbar.update(1)
         return media_list
@@ -300,100 +319,214 @@ class InstMan():
         userid = [profile.userid]
         highlights_and_stories = self.get_stories_or_highlights(userid,highlights=highlights, stories=stories, download=download)
         if posts:
-            r_posts, r_comments = self.get_posts(profile, comments=False, download=download)
+            r_posts, r_comments = self.get_posts(profile, comments=comments, download=download)
             data = self.handle_posts(r_posts, r_comments)
             self.mark_changes(data=data, type="posts", userid=str(userid[0]))
         if highlights_and_stories:
-            for media in highlights_and_stories:
-                if isinstance(media, Story):
-                    print(media.latest_media_local)
-                    for item in highlights_and_stories[0].get_items():
-                        print(dir(item))
-        return None
+            data = self.handle_otherm(highlights_and_stories)
+            if data['highlights']:
+                self.mark_changes(data=data, type="highlights", userid=str(userid[0]))
+            elif data['stories']:
+                self.mark_changes(data=data, type="stories", userid=str(userid[0]))
+            else:
+                logging.info("[!] No stories nor highlights were found.")
 
-    def handle_posts(self, posts: List[Post], comments: List[Dict[str, Union[str, List[PostComment]]]]) -> dict:
-        """ Handler for processing posts """
-        data = {}
-        if posts:
-            comments_by_postcode = {}
-            for comment in comments:
-                postcode = comment.get('postcode')
-                if postcode:
-                    comments_by_postcode.setdefault(postcode, []).append(comment)
-            for post in posts:
-                post_comments = comments_by_postcode.get(post.shortcode, [])
-                likers = [like for like in post.get_likes()]
+    def handle_otherm(self, items: List[Union[Story, Highlight]]) -> Dict[str, Dict[str, Union[str, Dict[str, str], bool]]]: # FIXME Only handling 1 dict.
+        """Handler for processing stories and highlights"""
+        data = {"highlights": {}, "stories": {}}
+        for media in items:
+            for item in media.get_items():
+                shared_to_fb = item._node.get('iphone_struct', {}).get('has_shared_to_fb') == 3
+                fb_user_tags = item._node.get('iphone_struct', {}).get('fb_user_tags', {})
+                media_origndate = item._node.get('iphone_struct', {}).get('imported_taken_at')
+                original_date = datetime.fromtimestamp(media_origndate).strftime("%Y-%m-%d_%H:%M:%S") if media_origndate else None
+                clickable_items = item._node.get('tappable_objects')
+                shared_from_fb = item._node.get('iphone_struct', {}).get('is_fb_post_from_fb_story')
                 post_data = {
-                    "postdate": post.date_utc.strftime("%Y-%m-%d_%H%M%S"),
-                    "caption": post.caption,
-                    "caption_mentioned": post.caption_mentions,
-                    "caption_hashtags": post.caption_hashtags,
-                    "tagged": post.tagged_users,
-                    "media_count": post.mediacount,
-                    "total_likes": post.likes,
-                    "total_comments": post.comments,
-                    "liked_by": [user.username for user in likers],
-                    "location": self.get_location(post.location),
-                    "video_view_count": post.video_view_count,
-                    "comments": {}
+                    item.shortcode: {
+                        "upload_date": item.date_local.strftime("%Y-%m-%d_%H:%M:%S"),
+                        "expire_seen": item.expiring_local.strftime("%Y-%m-%d_%H:%M:%S"),
+                        "original_date": original_date,
+                        "mentions": {},
+                        "clickable_items": clickable_items,
+                        "fb_user_tags": fb_user_tags,
+                        "shared_from_fb": shared_from_fb,
+                        "shared_to_fb": shared_to_fb
+                    }
                 }
-                data[post.shortcode] = post_data
-                for com in post_comments:
-                    for comment in com['postcomment']:
-                        data[post.shortcode]['comments'][comment.id] = {comment.owner.username: comment.text}
+                if isinstance(media, Highlight):
+                    data["highlights"].setdefault(media.title, {}).update(post_data) # replace unique_id
+                elif isinstance(media, Story):
+                    data["stories"].update(post_data)
         return data
 
-    def media_changed(self, new_data: dict, old_data: dict, userid: str, type: str="posts"):
-        """ Track user media change from posts/stories/highlights """
-        if len(new_data) != len(old_data):
-            logging.info(f"Media {type} has been changed from {len(old_data)} to {len(new_data)}")
-            deleted = set(old_data.keys()).difference(new_data.keys())
-            new = set(new_data.keys()).difference(old_data.keys())
-            changed = [{type: len(new_data)}]
-            old_changed = [{type: len(old_data)}]
+    def handle_posts(self, posts: List[Post], comments: List[Dict[str, Union[str, List[PostComment]]]]) -> Dict[str, dict]:
+        """ Handler for processing posts """
+        data = {"posts": {}}
+        comments_by_postcode = defaultdict(list)
+        for comment in comments:
+            postcode = comment.get('postcode')
+            if postcode:
+                comments_by_postcode[postcode].append(comment)
+
+        for post in posts:
+            post_comments = comments_by_postcode.get(post.shortcode) or []
+            likers = [like.username for like in post.get_likes()]
+            post_data = {
+                "postdate": post.date_utc.strftime("%Y-%m-%d_%H%M%S"),
+                "caption": post.caption,
+                "caption_mentioned": post.caption_mentions,
+                "caption_hashtags": post.caption_hashtags,
+                "tagged": post.tagged_users,
+                "media_count": post.mediacount,
+                "total_likes": post.likes,
+                "total_comments": post.comments,
+                "liked_by": likers,
+                "location": self.get_location(post.location),
+                "video_view_count": post.video_view_count,
+                "comments": {
+                    comment.id: {
+                        comment.owner.username: {
+                            "text": comment.text,
+                            "total_likes": comment.likes_count,
+                            "liked_by": ([like.username for like in comment.likes] if comment.likes_count <= 25 else [])
+                        }
+                    } for com in post_comments for comment in com['postcomment']
+                }
+            }
+            data["posts"][post.shortcode] = post_data
+        return data
+
+    def highlights_changed(self, previous_data: dict, current_data: dict, userid: str) -> Dict:
+        """ Track media change from highlights """
+        # bp()
+        previous_highlights = set(previous_data.keys())
+        current_highlights = set(current_data.keys())
+        new_highlights = list(current_highlights - previous_highlights)
+        deleted_highlights = list(previous_highlights - current_highlights)
+        for highlight in previous_highlights.intersection(current_highlights):
+            previous_stories = previous_data.get(highlight, {})
+            current_stories = current_data.get(highlight, {})
+            previous_stories_set = set(previous_stories.keys())
+            current_stories_set = set(current_stories.keys())
+            new_stories = list(current_stories_set - previous_stories_set)
+            deleted_stories = list(previous_stories_set - current_stories_set)
+
+            if new_stories:
+                logging.info(f"[+] New Stories {new_stories} Found in Highlight '{highlight}'")
+                previous_data = self.handle_changes(data=current_data, post_data=previous_data, new=set(new_stories),
+                                        deleted=set(), key=highlight, type='stories', userid=userid)
+            # Check for deleted stories within the highlight
+            if deleted_stories:
+                logging.info(f"Deleted Stories {deleted_stories} From Highlight '{highlight}'")
+                previous_data = self.handle_changes(data=current_data, post_data=previous_data, new=set(),
+                                        deleted=set(deleted_stories), key=highlight, type='stories', userid=userid)
+
+        if new_highlights:
+            logging.info(f"[+] New Highlights: {new_highlights} were discovered")
+            for new in new_highlights:
+                previous_data.update({new: current_data[new]})
+        if deleted_highlights:
+            logging.info(f"[+] Deleted Highlights: {deleted_highlights} were removed")
+            for deleted in deleted_highlights:
+                previous_data.pop(deleted)
+
+        return previous_data
+
+    def media_changed(self, current_data: dict, previous_data: dict, userid: str, type: str = "posts") -> Union[bool, Tuple[Set, Set]]:
+        """ Track user media change from posts/stories """
+        num_current = len(current_data)
+        num_previous = len(previous_data)
+        if num_current != num_previous:
+            logging.info(f"Media {type} has been changed from {num_previous} to {num_current}")
+            deleted = set(previous_data.keys()).difference(current_data.keys())
+            new = set(current_data.keys()).difference(previous_data.keys())
+            changed = [{type: num_current}]
+            old_changed = [{type: num_previous}]
             self.save_changes(changed, old_changed, userid)
             return new, deleted
         else:
             logging.info(f"No {type} changes were found")
             return False
 
-    def check_downloaded(self, date: str) -> bool:
+    def check_downloaded(self, type: str, dirname: str) -> bool:
         """ Check if media is downloaded """
-        dir = Path(Path.cwd().parent.as_posix()+f"/media/{str(self.profile.username)}/{date}/") # type: ignore
-        if dir.is_dir():
-            return True
-        return False
+        dir = Path(Path.cwd().parent.as_posix()+f"/media/{str(self.profile.username)}/{type}/{dirname}/") # type: ignore
+        return dir.is_dir()
+
+    def log_new(self, data: dict, type: str):
+        """ Log new items """
+        for item in data[type]:
+            if type == "posts":
+                bp()
+                logging.info(f"[+] saving post {data[type][item]['caption']}")
+            elif type == "highlights":
+                logging.info(f"[+] saving highlight {item} with {len(data[type][item])} stories")
+            else:
+                logging.info(f"[+] saving story {data[type][item]['upload_data']}")
 
     def mark_changes(self, data: dict, type: str, userid: str) -> None:
         """ Mark/Save Changes from stories/highlights/posts """
-        _, _, post_file = self.user_file(userid)
-        post_data = self.read_write(post_file, data=None) or {}
+        if type == "posts":
+            data_file = self.user_file(userid, "postdata")
+        else:
+            data_file = self.user_file(userid, "storydata")
+        post_data = self.read_write(data_file, data=None) or {}
         if not post_data:
-            logging.info(f"No {type} metadata was saved yet, saving..")
+            logging.info(f"No {type} metadata was saved yet..")
+            self.log_new(data=data, type=type)
             post_data.update(data)
-            self.read_write(post_file, post_data, mode='w')
+            self.read_write(data_file, post_data, mode='w')
             return
-        try:
-            new, deleted = self.media_changed(data, post_data, userid, type=type)  # type: ignore
-            if new:
-                post_data.update(data)
-                logging.info(f"{type} item {data['caption']} has been added to db")
-            if deleted:
-                deleted_post = post_data.pop(list(deleted)[0])
-                if self.check_downloaded(deleted_post['postdate']):
-                    logging.info(f"Luckily deleted {type} {deleted_post['caption']} was already downloaded")
-                else:
-                    logging.info(f"Unlucky deleted {type} {deleted_post['caption']} was not downloaded before")
-                    logging.info("But its metadata is still saved for data processing")
-                self.media_new({list(deleted)[0]: deleted_post}, userid)
-            self.read_write(post_file, post_data, mode='w')
-        except Exception as e:
+        try: #FIXME Add Highlight media changes.
+            # bp()
+            if type == 'highlights':
+                post_data = self.highlights_changed(previous_data=post_data[type], current_data=data[type],
+                                        userid=userid)
+            else:
+                new, deleted = self.media_changed(data[type], post_data[type], userid, type=type)  # type: ignore # works only for posts and stories
+                post_data = self.handle_changes(data=data, post_data=post_data, new=new,
+                                                deleted=deleted, key=type, type=type, userid=userid)
+            self.read_write(data_file, post_data, mode='w')
+        except Exception as _:
             logging.info(f"{type} items are already at their latest")
             return
 
+    def handle_changes(self, data: dict, post_data: dict, new: set,
+                       deleted: set, key: str, type: str, userid: str) -> Dict:
+        """ Documentation """
+        key = key if key != type else type
+        print(key)
+        bp()
+        if new:
+            post_data[key].update(data[key])
+            for post in list(new):
+                if type == 'stories':
+                    datetime_str = data[key][post]['upload_date']
+                    dt = datetime.strptime(datetime_str, '%Y-%m-%d_%H:%M:%S')
+                    item_key = dt.strftime('%A-%m-%d-%Y_%H:%M:%S')
+                else:
+                    item_key = data[key][post]['caption']
+                logging.info(f"{type} item {item_key} has been added to db")
+        if deleted:
+            for post in list(deleted):
+                deleted_post = post_data[key].pop(post)
+                if type != "posts":
+                    dirname = download_cap = deleted_post['upload_date']
+                    dirname = datetime.strptime(dirname, '%Y-%m-%d_%H:%M:%S')
+                    dirname = f"story_{dirname.strftime('%Y-%m-%d')}"
+                else: dirname = deleted_post['postdate']; download_cap = deleted_post['caption']
+                if self.check_downloaded(type=type, dirname=dirname):
+                    logging.info(f"Luckily deleted {type} {download_cap} was already downloaded")
+                else:
+                    logging.info(f"Unlucky deleted {type} {download_cap} was not downloaded before")
+                    logging.info("But its metadata is still saved for data processing")
+                self.deleted_save(data={post: deleted_post}, userid=userid, type=type)
+        return post_data
+
     def save_changes(self, changes, old_changes, userid):
         """ Save User Changes Into A File """
-        _, user_mark, _ = self.user_file(userid)
+        user_mark = self.user_file(userid, "changes")
         sdata, _ = self.read_data(user_mark, userid)
         changes_keys = list(changes[0].keys())
         if not sdata:
@@ -427,19 +560,19 @@ class InstMan():
             data[userid][key].append(new_data)
         self.read_write(userfile, data, mode='w')
 
-    def media_new(self, data, userid):
-        """ Save deleted metadata """
+    def deleted_save(self, data: dict, userid:str, type: str):
+        """ Save deleted posts/stories/highlights metadata """
         dfile = Path(f"~/.config/instman/userdata/{userid}/deleted_media.json").expanduser()
         dfile.touch()
         old_data, _ = self.read_data(dfile, userid)
         if not old_data:
-            old_data = {}
-        old_data.update(data)
+            old_data = {"posts": {}, "stories": {}, "highlights": {}}
+        old_data[type].update(data)
         self.read_write(dfile, old_data, mode='w')
 
     def renew_data(self, data, userid, k, v):
         """ Renew old data once changes were made """
-        user_file, _, _ = self.user_file(userid)
+        user_file = self.user_file(userid, "data")
         user_data, _ = self.read_data(user_file, userid)
         for item in data[v + k.capitalize()]:
             if "New" in v:
@@ -453,7 +586,7 @@ class InstMan():
 
     def save_data(self, userid, profile):
         """ Save new data in a file """
-        user_file, _, _ = self.user_file(userid)
+        user_file = self.user_file(userid, "data")
         read_data, _ = self.read_data(user_file, userid)
         if not read_data:
             followers = self.get_followers(profile) # list
@@ -483,13 +616,13 @@ def main():
         if args.users:
             with args.users as f:
                 users = f.readlines()
-                Ist.user_data(users)
+                Ist.user_data(users, args.ignore_count)
         else:
-            Ist.user_data(list(args.user))
+            Ist.user_data(list(args.user), args.ignore_count)
     elif args.print:
         Ist.get_info(args.user[0])
     elif args.media:
-        Ist.list_media(args.user[0], args.highlights, args.stories, args.posts, args.download)
+        Ist.list_media(args.user[0], args.highlights, args.stories, args.posts, args.comments, args.download)
     else:
         # profile = Ist.profile_access(args.user[0])
         # print(Ist.get_hashtags(profile))
